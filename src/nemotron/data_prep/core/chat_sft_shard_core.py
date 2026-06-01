@@ -38,7 +38,7 @@ from nemotron.data_prep.utils.filesystem import ensure_dir, get_filesystem, read
 from nemotron.data_prep.packing.algorithms import get_packer
 from nemotron.data_prep.packing.bin_assignment import BinAssignment
 from nemotron.data_prep.packing.materialize import materialize_bin_arrays
-from nemotron.data_prep.packing.writers import ParquetShardWriter
+from nemotron.data_prep.packing.writers import ParquetShardWriter, SequenceParquetWriter
 from nemotron.data_prep.packing.spool import (
     SequenceSpoolPaths,
     SequenceSpoolReader,
@@ -490,3 +490,153 @@ def process_chat_sft_parquet_from_spool_core(
 # Alias following the naming convention: process_<format>_<operation>_core
 # Provides a consistent name pattern across all core processing functions
 process_chat_sft_parquet_core = process_chat_sft_parquet_from_spool_core
+
+
+def _build_unpacked_labels_and_loss_mask(
+    input_ids: np.ndarray,
+    original_loss_mask: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build next-token labels and aligned loss mask for one un-packed sequence.
+
+    The input spool stores the original role-based mask on the current token.
+    For next-token training, labels are shifted left by one token and the loss
+    mask must align with the label positions:
+      - labels[i] = input_ids[i + 1]
+      - aligned_loss_mask[i] = original_loss_mask[i + 1]
+      - labels[-1] = -100, aligned_loss_mask[-1] = 0
+    """
+    seq_len = int(input_ids.shape[0])
+    labels = np.full((seq_len,), -100, dtype=np.int32)
+    aligned_loss_mask = np.zeros((seq_len,), dtype=np.uint8)
+
+    if seq_len <= 1:
+        return labels, aligned_loss_mask
+
+    next_tokens = np.asarray(input_ids[1:], dtype=np.int32)
+    next_mask = np.asarray(original_loss_mask[1:], dtype=np.uint8)
+
+    labels[:-1] = np.where(next_mask > 0, next_tokens, -100).astype(np.int32, copy=False)
+    aligned_loss_mask[:-1] = next_mask
+    return labels, aligned_loss_mask
+
+
+def process_chat_sft_unpacked_parquet_from_spool_core(
+    *,
+    shard_index: int,
+    output_dir: str,
+    spool_dir: str,
+    output_fs: AbstractFileSystem,
+    parquet_row_group_size: int = 1000,
+    parquet_compression: str = "zstd",
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Read a SequenceSpool and write one row per original sequence to Parquet."""
+    shard_id = f"shard_{shard_index:06d}"
+    parquet_path = f"{output_dir.rstrip('/')}/{shard_id}.parquet"
+
+    if parquet_row_group_size <= 0:
+        raise ValueError(f"parquet_row_group_size must be positive, got {parquet_row_group_size}")
+
+    ensure_dir(output_fs, output_dir)
+
+    paths = SequenceSpoolPaths.for_root(spool_dir)
+    if not output_fs.exists(paths.manifest_path):
+        raise RuntimeError(f"Missing spool manifest for shard {shard_id}: {paths.manifest_path}")
+
+    try:
+        manifest = read_json(output_fs, paths.manifest_path)
+    except Exception as e:
+        raise RuntimeError(f"Failed to read spool manifest for shard {shard_id}: {paths.manifest_path}") from e
+
+    tokenization_stats = manifest.get("tokenization_stats", {})
+    if not isinstance(tokenization_stats, dict):
+        tokenization_stats = {}
+
+    input_files = manifest.get("input_files", [])
+    if not isinstance(input_files, list):
+        input_files = []
+
+    reader = SequenceSpoolReader(fs=output_fs, paths=paths)
+
+    try:
+        _, lengths = reader.load_offsets_and_lengths()
+        num_sequences = int(lengths.shape[0])
+        total_tokens = int(lengths.astype(np.int64, copy=False).sum())
+
+        try:
+            if output_fs.exists(parquet_path):
+                output_fs.rm(parquet_path)
+        except Exception:
+            pass
+        try:
+            tmp_path = parquet_path + ".tmp"
+            if output_fs.exists(tmp_path):
+                output_fs.rm(tmp_path)
+        except Exception:
+            pass
+
+        pa_filesystem = None
+        try:
+            import pyarrow as pa
+
+            protocol = getattr(output_fs, "protocol", None)
+            if isinstance(protocol, (tuple, list)):
+                protocol = protocol[0] if protocol else None
+            if protocol not in (None, "", "file", "local"):
+                pa_filesystem = pa.fs.PyFileSystem(pa.fs.FSSpecHandler(output_fs))
+        except Exception:
+            pa_filesystem = None
+
+        writer = SequenceParquetWriter(
+            output_path=parquet_path,
+            row_group_size=int(parquet_row_group_size),
+            compression=str(parquet_compression),
+            filesystem=pa_filesystem,
+        )
+
+        num_supervised_tokens = 0
+        for seq_index in range(num_sequences):
+            input_ids, original_loss_mask = reader.read_sequence(seq_index)
+            labels, aligned_loss_mask = _build_unpacked_labels_and_loss_mask(input_ids, original_loss_mask)
+            num_supervised_tokens += int((labels != -100).sum())
+            writer.write_sequence(input_ids, aligned_loss_mask, labels)
+
+        writer_result = writer.finalize()
+
+        try:
+            parquet_bytes = int(output_fs.size(parquet_path))
+        except Exception:
+            parquet_bytes = 0
+
+        stats: dict[str, Any] = {
+            "num_sequences": num_sequences,
+            "num_rows": num_sequences,
+            "total_tokens": total_tokens,
+            "num_supervised_tokens": num_supervised_tokens,
+            "packing": {
+                "pack_size": None,
+                "algorithm": "none",
+                "packing_factor": 1.0,
+                "packing_efficiency": 100.0,
+                "parquet_row_group_size": int(parquet_row_group_size),
+                "parquet_compression": str(parquet_compression),
+                "writer": writer_result,
+            },
+            **tokenization_stats,
+        }
+
+        files_metadata: dict[str, Any] = {
+            "parquet": {
+                "path": f"{shard_id}.parquet",
+                "bytes": parquet_bytes,
+                "checksum": "xxh64:unknown",
+            },
+            "input_files": [str(x) for x in input_files],
+        }
+
+        return stats, files_metadata
+
+    finally:
+        try:
+            reader.close()
+        except Exception:
+            pass

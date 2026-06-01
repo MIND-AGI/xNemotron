@@ -78,6 +78,10 @@ from nemotron.data_prep.stages.vlm_preference_prep import (
     VlmPreferencePrepStageConfig,
 )
 from nemotron.data_prep.stages.packed_sft_parquet import PackedSftParquetStage, PackedSftParquetStageConfig
+from nemotron.data_prep.stages.unpacked_sft_parquet import (
+    UnpackedSftParquetStage,
+    UnpackedSftParquetStageConfig,
+)
 from nemotron.data_prep.stages.plan import PlanAdapter, PlanStage, PlanStageConfig
 from nemotron.data_prep.stages.sft_plan import SftPlanStageConfig
 from nemotron.data_prep.stages.webdataset_shard import WebDatasetShardStage, WebDatasetShardStageConfig
@@ -95,6 +99,7 @@ __all__ = [
     "DownloadStageConfig",
     "BinIdxTokenizationStageConfig",
     "PackedSftParquetStageConfig",
+    "UnpackedSftParquetStageConfig",
     "AudioExtractStageConfig",
     "WebDatasetShardStageConfig",
     "VlmPreferencePrepStageConfig",
@@ -104,6 +109,7 @@ __all__ = [
     "JsonlShardStage",
     "BinIdxTokenizationStage",
     "PackedSftParquetStage",
+    "UnpackedSftParquetStage",
     "AudioExtractStage",
     "WebDatasetShardStage",
     "VlmPreferencePrepStage",

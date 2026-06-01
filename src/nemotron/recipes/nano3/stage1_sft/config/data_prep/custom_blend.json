@@ -2,7 +2,7 @@
   "datasets": [
     {
       "name": "my-tool-call",
-      "path": "/Users/bytedance/Movies/automodel/Nemotron/datasets/samples/tool_calling.jsonl",
+      "path": "/Users/bytedance/Movies/automodel/xNemotron/datasets/normalized_samples/tool_calling.jsonl",
       "weight": 1.0
     }
   ]

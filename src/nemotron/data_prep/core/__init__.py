@@ -62,6 +62,7 @@ from nemotron.data_prep.core.jsonl_shard_core import (
 from nemotron.data_prep.core.chat_sft_shard_core import (
     process_chat_sft_parquet_from_spool_core,
     process_chat_sft_spool_core,
+    process_chat_sft_unpacked_parquet_from_spool_core,
 )
 
 # Planning utilities
@@ -112,6 +113,7 @@ __all__ = [
     "process_chat_sft_spool_core",  # Phase 1: tokenize to spool
     "process_chat_sft_parquet_from_spool_core",  # Original name
     "process_chat_sft_parquet_core",  # Standardized alias
+    "process_chat_sft_unpacked_parquet_from_spool_core",
     # Planning
     "PlanRequest",
     "create_plan",

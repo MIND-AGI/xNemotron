@@ -1,0 +1,62 @@
+run:
+  env:
+    container: anyscale/ray:2.49.2-py312
+
+# Default config for exporting un-packed SFT parquet.
+#
+# Output rows contain:
+#   - input_ids
+#   - loss_mask
+#   - labels
+#
+# labels[i] = input_ids[i+1] when that next-token position is trainable,
+# otherwise -100. The last token always has label -100.
+
+blend_path: ${oc.env:PWD}/src/nemotron/recipes/nano3/stage1_sft/config/data_prep/data_blend_raw.json
+output_dir: ${oc.env:PWD}/../output/stage1_sft_unpacked
+num_shards: 128
+
+tokenizer:
+  model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
+  add_bos: false
+  add_eos: true
+
+parquet_row_group_size: 1000
+parquet_compression: zstd
+
+chat_template: nano3
+messages_field: messages
+tools_field: tools
+used_in_filter: nano_v3
+used_in_field: used_in
+max_doc_tokens: null
+
+sample: null
+sample_seed: 42
+force: false
+execution_mode: auto
+config_name: default
+
+# These two fields are carried only because the shared SFT setup/work-item
+# machinery still includes them. They do not trigger packing in this exporter.
+pack_size: 20480
+algorithm: first_fit_shuffle
+seed: null
+
+plan:
+  planner_cpus: 0.5
+
+download:
+  batch_size: 1
+  stage_cpus: 0.5
+  hf_xet_high_performance: true
+  hf_xet_concurrent_range_gets: 32
+  max_retries: 3
+  timeout_sec: 300
+
+tokenization:
+  cpus_per_worker: 4
+
+observability:
+  pipeline_logging_interval_s: 30
+  wandb_log_pipeline_stats: true

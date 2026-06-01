@@ -163,6 +163,113 @@ class ParquetShardWriter:
         }
 
 
+class SequenceParquetWriter:
+    """Row-based Parquet writer for un-packed tokenized sequences.
+
+    Format:
+      shard_000000.parquet
+        - input_ids: list<int32>
+        - loss_mask: list<uint8>
+        - labels: list<int32>
+
+    Each row corresponds to one original sequence after chat templating,
+    tokenization, and label/mask alignment, without any sequence packing.
+    """
+
+    SCHEMA = pa.schema(
+        [
+            ("input_ids", pa.list_(pa.int32())),
+            ("loss_mask", pa.list_(pa.uint8())),
+            ("labels", pa.list_(pa.int32())),
+        ]
+    )
+
+    def __init__(
+        self,
+        output_path: str,
+        row_group_size: int = 1000,
+        compression: str = "zstd",
+        filesystem: pa.fs.FileSystem | None = None,
+    ) -> None:
+        if row_group_size <= 0:
+            raise ValueError(f"row_group_size must be > 0, got {row_group_size}")
+
+        self.output_path = output_path
+        self.tmp_path = output_path + ".tmp"
+        self.row_group_size = int(row_group_size)
+        self.compression = _normalize_compression(compression)
+        self.filesystem = filesystem
+
+        self._input_ids_values: list[np.ndarray] = []
+        self._loss_mask_values: list[np.ndarray] = []
+        self._labels_values: list[np.ndarray] = []
+        self._count = 0
+        self._total_sequences = 0
+        self._closed = False
+
+        self._writer = pq.ParquetWriter(
+            self.tmp_path,
+            self.SCHEMA,
+            compression=self.compression,
+            filesystem=self.filesystem,
+        )
+
+    def write_sequence(
+        self,
+        input_ids: np.ndarray,
+        loss_mask: np.ndarray,
+        labels: np.ndarray,
+    ) -> None:
+        if self._closed:
+            raise RuntimeError("SequenceParquetWriter is closed")
+
+        self._input_ids_values.append(np.asarray(input_ids, dtype=np.int32))
+        self._loss_mask_values.append(np.asarray(loss_mask, dtype=np.uint8))
+        self._labels_values.append(np.asarray(labels, dtype=np.int32))
+        self._count += 1
+        self._total_sequences += 1
+
+        if self._count >= self.row_group_size:
+            self._flush_buffer()
+
+    def _flush_buffer(self) -> None:
+        if self._count == 0:
+            return
+
+        input_ids_arr = pa.array(self._input_ids_values, type=pa.list_(pa.int32()))
+        loss_mask_arr = pa.array(self._loss_mask_values, type=pa.list_(pa.uint8()))
+        labels_arr = pa.array(self._labels_values, type=pa.list_(pa.int32()))
+
+        table = pa.Table.from_arrays(
+            [input_ids_arr, loss_mask_arr, labels_arr],
+            schema=self.SCHEMA,
+        )
+        self._writer.write_table(table)
+
+        self._input_ids_values.clear()
+        self._loss_mask_values.clear()
+        self._labels_values.clear()
+        self._count = 0
+
+    def finalize(self) -> dict[str, Any]:
+        if self._closed:
+            raise RuntimeError("SequenceParquetWriter is already finalized/closed")
+        self._closed = True
+
+        self._flush_buffer()
+        self._writer.close()
+
+        _move_atomic(src=self.tmp_path, dst=self.output_path, filesystem=self.filesystem)
+
+        return {
+            "format": "parquet",
+            "compression": self.compression or "none",
+            "num_sequences": int(self._total_sequences),
+            "row_group_size": int(self.row_group_size),
+        }
+
+
 __all__ = [
     "ParquetShardWriter",
+    "SequenceParquetWriter",
 ]
